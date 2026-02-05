@@ -15,6 +15,7 @@ import (
 var (
 	insIndent     int
 	commentIndent int
+	typeDecIndent int
 )
 
 func init() {
@@ -24,9 +25,13 @@ func init() {
 	}
 	flag.IntVar(&insIndent, "ii", 8, "Indentation for instructions in spaces")
 	flag.IntVar(&commentIndent, "ci", 40, "Indentation for comments in spaces")
+	flag.IntVar(&typeDecIndent, "tdi", 30, "Indentation for types after labels")
 }
 
 type asmLine struct {
+	global  string
+	extern  string
+	section string
 	label   string
 	text    string
 	comment string
@@ -103,19 +108,6 @@ func noquotes(s, rep string) string {
 	return string(outr)
 }
 
-var dataPseudos = compilePseudoes()
-
-func compilePseudoes() (ret []*regexp.Regexp) {
-	var (
-		raw = []string{"db", "dw", "dd", "dq", "ddq", "do", "dt"}
-		re  = `(?:\s|^)%v(?:\s|")`
-	)
-	for _, p := range raw {
-		ret = append(ret, regexp.MustCompile(fmt.Sprintf(re, p)))
-	}
-	return
-}
-
 func parseLabel(line string) (lbl string, rest string) {
 	lbl = ""
 	rest = line
@@ -123,17 +115,8 @@ func parseLabel(line string) (lbl string, rest string) {
 
 	ind := strings.Index(noq, ":")
 	if ind >= 0 {
-		lbl = strings.TrimSpace(line[:ind])
+		lbl = strings.TrimSpace(line[:ind+1])
 		rest = line[ind+1:]
-	}
-
-	for _, pseudo := range dataPseudos {
-		inds := pseudo.FindStringIndex(noq)
-		if len(inds) > 0 {
-			ind := inds[0]
-			lbl = strings.TrimSpace(line[:ind])
-			rest = line[ind:]
-		}
 	}
 
 	// Labels should not contain space
@@ -142,7 +125,7 @@ func parseLabel(line string) (lbl string, rest string) {
 		lbl, rest = "", line
 	}
 
-	return
+	return lbl, rest
 }
 
 func parseComment(line string) (cmt string, rest string) {
@@ -150,8 +133,42 @@ func parseComment(line string) (cmt string, rest string) {
 
 	ind := strings.Index(noq, ";")
 	if ind >= 0 {
-		cmt = strings.TrimSpace(line[ind+1:])
+		cmt = line[ind+2:]
 		rest = line[:ind]
+		return
+	}
+
+	return "", line
+}
+
+func parseGlobal(line string) (global string, rest string) {
+	noq := noquotes(line, "x")
+
+	ind := strings.Index(noq, "global")
+	if ind >= 0 {
+		global = strings.TrimSpace(line[ind:])
+		return
+	}
+	return "", line
+}
+
+func parseExtern(line string) (extern string, rest string) {
+	noq := noquotes(line, "x")
+
+	ind := strings.Index(noq, "extern")
+	if ind >= 0 {
+		extern = strings.TrimSpace(line[ind:])
+		return
+	}
+	return "", line
+}
+
+func parseSection(line string) (section string, rest string) {
+	noq := noquotes(line, "x")
+
+	ind := strings.Index(noq, "section")
+	if ind >= 0 {
+		section = strings.TrimSpace(line[ind:])
 		return
 	}
 	return "", line
@@ -160,6 +177,9 @@ func parseComment(line string) (cmt string, rest string) {
 func parseLine(line string) *asmLine {
 	l := &asmLine{}
 
+	l.global, line = parseGlobal(line)
+	l.section, line = parseSection(line)
+	l.extern, line = parseExtern(line)
 	l.comment, line = parseComment(line)
 	l.label, line = parseLabel(line)
 
@@ -171,7 +191,7 @@ func parseLine(line string) *asmLine {
 }
 
 func (l *asmLine) empty() bool {
-	return l.label == "" && l.text == "" && l.comment == ""
+	return l.label == "" && l.text == "" && l.comment == "" && l.section == "" && l.extern == "" && l.global == ""
 }
 
 func (l *asmLine) print(w io.Writer) {
@@ -181,17 +201,28 @@ func (l *asmLine) print(w io.Writer) {
 		column = 0
 	)
 
-	if l.label != "" {
-		w.Write([]byte(l.label))
-		w.Write([]byte{':'})
-		column += utf8.RuneCountInString(l.label) + 1
-		if l.text != "" {
-			w.Write(newl)
-			column = 0
-		}
+	if l.section != "" {
+		w.Write([]byte(l.section))
 	}
 
-	if l.text != "" {
+	if l.extern != "" {
+		w.Write([]byte(l.extern))
+	}
+
+	if l.global != "" {
+		w.Write([]byte(l.global))
+	}
+
+	if l.label != "" {
+		labelTypeLen := typeDecIndent
+		w.Write([]byte(l.label))
+		column += utf8.RuneCountInString(l.label) + 1
+		if l.text != "" {
+			w.Write(bytes.Repeat(space, labelTypeLen-column))
+			w.Write([]byte(l.text))
+			column = 0
+		}
+	} else if l.text != "" {
 		w.Write(bytes.Repeat(space, insIndent))
 		w.Write([]byte(l.text))
 		column += insIndent
@@ -206,6 +237,7 @@ func (l *asmLine) print(w io.Writer) {
 				w.Write(space)
 			}
 		}
+
 		w.Write([]byte{';', ' '})
 		w.Write([]byte(l.comment))
 	}
